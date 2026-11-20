@@ -1,0 +1,24 @@
+# Next.js 在本机运行。这里只提供 Postgres。
+# 镜像选用 pgvector，是为了后面的方法卡向量索引不用再换数据库。
+# 消息表不使用向量列。
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: advisor
+      POSTGRES_PASSWORD: advisor
+      POSTGRES_DB: advisor
+    ports:
+      - "5432:5432"
+    volumes:
+      - advisor_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U advisor -d advisor"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  advisor_postgres_data:
