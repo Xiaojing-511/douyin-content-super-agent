@@ -82,6 +82,7 @@ export function redactSecrets(text: string): string {
   let redacted = text;
   for (const secret of [
     config.llmApiKey,
+    config.searchApiKey,
     (process.env.EMBEDDING_API_KEY ?? "").trim(),
     (process.env.RERANK_API_KEY ?? "").trim(),
   ]) {

@@ -32,8 +32,27 @@ export interface StreamTraceData {
   detail?: unknown;
 }
 
+export interface StreamToolData {
+  phase: string;
+  name: string;
+  detail: string;
+}
+
+export interface StreamFileData {
+  fileId: string;
+  title: string;
+  bytes: string;
+}
+
+export interface ExportLink {
+  fileId: string;
+  title: string;
+}
+
 export interface VisibleMessage {
   localKey: string;
   role: ConversationRole;
   content: string;
+  activity?: string;
+  exports?: ExportLink[];
 }

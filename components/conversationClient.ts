@@ -13,9 +13,12 @@ import { clientLogger } from "@/components/clientLogger";
 import { ServerSentEventBuffer } from "@/lib/conversation/parse-server-sent-events";
 import type {
   ConversationHistory,
+  ExportLink,
   MessageDeltaData,
   StreamDoneData,
   StreamErrorData,
+  StreamFileData,
+  StreamToolData,
   StreamTraceData,
 } from "@/lib/conversation/types";
 
@@ -70,6 +73,8 @@ export async function requestStopGeneration(): Promise<boolean> {
 
 export interface StreamHandlers {
   onDelta: (deltaText: string) => void;
+  onTool: (tool: StreamToolData) => void;
+  onFile: (file: ExportLink) => void;
   onDone: (doneData: StreamDoneData) => void;
   onStreamError: (message: string) => void;
 }
@@ -79,6 +84,7 @@ export async function streamReply(
   handlers: StreamHandlers,
   signal: AbortSignal,
   isStopRequested: () => boolean = () => false,
+  webSearch = false,
 ): Promise<void> {
   clientLogger.info("开始请求对话接口", { 路径: "/api/chat/runs", 内容: content });
   let response: Response;
@@ -89,7 +95,7 @@ export async function streamReply(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, webSearch }),
       signal,
     });
   } catch (error: unknown) {
@@ -171,6 +177,24 @@ function dispatchServerEvent(eventName: string, data: unknown, handlers: StreamH
     const traceData = data as StreamTraceData;
     const step = typeof traceData?.step === "string" ? traceData.step : "服务端步骤";
     clientLogger.info(step, traceData?.detail);
+    return;
+  }
+  if (eventName === "tool") {
+    const toolData = data as StreamToolData;
+    if (typeof toolData?.phase === "string" && typeof toolData.name === "string") {
+      handlers.onTool({
+        phase: toolData.phase,
+        name: toolData.name,
+        detail: typeof toolData.detail === "string" ? toolData.detail : "",
+      });
+    }
+    return;
+  }
+  if (eventName === "file.saved") {
+    const fileData = data as StreamFileData;
+    if (typeof fileData?.fileId === "string" && typeof fileData.title === "string") {
+      handlers.onFile({ fileId: fileData.fileId, title: fileData.title });
+    }
     return;
   }
   if (eventName === "message.delta") {

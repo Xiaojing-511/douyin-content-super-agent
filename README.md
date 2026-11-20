@@ -2,7 +2,7 @@
 
 给亲密关系认知类短视频创作者用的单会话口播顾问。使用者抛出一个日常相处反应，顾问把它收成一段从容、具体、像本人会说的话：一个画面、一个机制、一个例子、一小步，并带上一句边界。页面标题是「关系认知顾问」。
 
-当前仓库是这条链路的可运行版本：固定一个会话、流式回复、Postgres 持久化，以及对话前的知识库检索。多会话、主机制卡片、写前确认、稿件导出还没有做。
+当前仓库是这条链路的可运行版本：固定一个会话、流式回复、Postgres 持久化、对话前的知识库检索，以及由模型决定是否调用的联网搜索和 PDF 导出。多会话、主机制卡片、写前确认还没有做。
 
 ## 现在能做什么
 
@@ -12,6 +12,8 @@
 - 发送前先检索 `rag/` 里的资料。按标题切分，向量存在同一套 Postgres 的 pgvector 里。配齐重排后，先召回 6 段，再留下 3 段放进这一轮提示。
 - 没配嵌入模型，或知识库还是空的，对话仍然可用，只是这一轮没有资料。
 - 系统提示限制在五个相处机制里，并拒绝诊疗、操控话术、关系去留等请求。约束写在提示词里，还没有独立的生成后护栏。
+- 输入框旁可以打开「联网搜索」。打开后模型才看得到 `web_search`，由它决定这轮用不用。没配搜索密钥时，对话仍然继续，只是不能核对外网。
+- 用户要求导出时，模型可以调用 `export_pdf`。文件写在服务端沙箱目录，气泡下方出现下载链接。导出失败不会让已经写出的口播丢失。
 
 ## 技术栈
 
@@ -28,7 +30,8 @@
 
 | 层 | 选择 | 代码 |
 | --- | --- | --- |
-| 编排 | LangGraph.js。图是 `retrieve → reply`，状态整表替换，不把半截回复累进下一轮 | `lib/graph/advisor.ts` |
+| 编排 | LangGraph.js。图是 `retrieve → advisor`，有 `tool_calls` 时执行工具再回到模型，没有就结束 | `lib/graph/advisor.ts` |
+| 工具 | `web_search` 受页面开关控制。`export_pdf` 用 pdfkit 把口播写成中文 PDF | `lib/tools/` |
 | 对话模型 | `@langchain/openai` 的 `ChatOpenAI`，关闭 Responses API，只走 `/chat/completions` | `lib/graph/model.ts` |
 | 检查点 | `@langchain/langgraph-checkpoint-postgres` 的 `PostgresSaver`。供后续人审恢复，页面不读它 | `lib/graph/checkpoint.ts` |
 | 系统提示 | 每次回复重读 Markdown，去掉文首 HTML 注释后再发给模型 | `prompt/advisor-system.md` |
@@ -46,8 +49,10 @@
   -> POST /api/chat/runs
   -> 用已落库历史覆盖图状态
   -> retrieve：嵌入本轮问句，余弦召回，可选重排
-  -> reply：系统提示 + 资料 + 历史，ChatOpenAI 流式输出
-  -> SSE  message.delta / trace / done / error
+  -> advisor：系统提示 + 资料 + 历史，按本轮开关绑定工具
+  -> 有 tool_calls 则执行 web_search 或 export_pdf，再回到 advisor
+  -> 没有 tool_calls 时，正文才作为回复
+  -> SSE  message.delta / tool / file.saved / trace / done / error
   -> 整轮成功，或停止时已经有可见文字，才写入 conversation_messages
 ```
 
@@ -57,10 +62,13 @@
 
 | 想看什么 | 从这里进 |
 | --- | --- |
+| 架构、技术栈、一次发送的全过程 | `doc/架构与实现.md` |
+| 顾问图的节点、分支和状态 | `doc/顾问图节点.md` |
 | 页面与停止按钮 | `components/ChatApp.tsx`、`components/useSingleConversation.ts` |
 | SSE 编解码 | `lib/conversation/sse.ts`、`components/conversationClient.ts` |
 | 发送、落库、中止 | `app/api/chat/runs/route.ts`、`app/api/chat/runs/stop/route.ts` |
 | 图和检索节点 | `lib/graph/advisor.ts` |
+| 联网搜索与 PDF | `lib/tools/`、`app/api/exports/[fileId]/route.ts` |
 | 切分、灌库、查询 | `lib/knowledge/`、`scripts/index-knowledge.ts` |
 | 资料正文 | `rag/` |
 | 顾问人设与拒绝范围 | `prompt/advisor-system.md` |
@@ -110,8 +118,26 @@ RERANK_API_KEY=
 RERANK_MODEL=
 ```
 
+联网搜索是可选项。页面上的开关默认关闭。要让打开后的搜索真正打到外网，再填：
+
+```bash
+SEARCH_BASE_URL=https://qianfan.baidubce.com
+SEARCH_API_KEY=
+```
+
+`SEARCH_BASE_URL` 是千帆根地址，请求发到 `{BASE_URL}/v2/ai_search/web_search`，使用百度搜索标准版，只取网页结果。密钥放在 `Authorization: Bearer`。密钥留空时，模型会看到「这一轮不能联网」，口播仍然可以生成。
+
+PDF 不需要额外命令。中文默认使用 macOS 的宋体。其他机器可以指定字体：
+
+```bash
+PDF_FONT_PATH=
+PDF_FONT_FAMILY=
+```
+
+生成的文件在 `data/exports/`，这个目录不进 git。下载地址是 `/api/exports/<文件编号>`。
+
 Postgres 用户、密码、库名都是 `advisor`，端口 `5432`。本机如果另有 PostgreSQL 占着 `127.0.0.1:5432`，连接会进到没有 pgvector 的那一份，灌库会报 `extension "vector" is not available`。先停掉本机实例，让 Docker 单独占用这个端口。
 
 ## 当前边界
 
-这一版故意保持单会话、单主模型。下面这些还没有接到页面或图上：主机制判定、写前的人工确认、按机制过滤的方法卡、生成后内容护栏、Markdown / PDF 导出、风格档案、长对话滚动摘要、对外工具调用。系统提示里的拒绝范围因此还不是硬拦截。
+这一版故意保持单会话、单主模型。联网搜索和进程内 PDF 已经可以由模型选择。下面这些还没有接到页面或图上：主机制判定、写前的人工确认、按机制过滤的方法卡、生成后内容护栏、用外部命令转 PDF、风格档案、长对话滚动摘要、对外 MCP。系统提示里的拒绝范围因此还不是硬拦截。

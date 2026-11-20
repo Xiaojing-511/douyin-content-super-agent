@@ -2,7 +2,15 @@ import { config, missingModelSettingNames } from "@/lib/config";
 import { ensureAdvisorGraph, iterAdvisorDeltas } from "@/lib/graph/advisor";
 import { beginActiveChatRun, endActiveChatRun } from "@/lib/conversation/active-run";
 import { appendCompletedTurn, listMessages } from "@/lib/conversation/repository";
-import { encodeDeltaEvent, encodeDoneEvent, encodeErrorEvent, encodeTraceEvent } from "@/lib/conversation/sse";
+import { exportMarkerLine, type ExportLink } from "@/lib/exports/marker";
+import {
+  encodeDeltaEvent,
+  encodeDoneEvent,
+  encodeErrorEvent,
+  encodeFileSavedEvent,
+  encodeToolEvent,
+  encodeTraceEvent,
+} from "@/lib/conversation/sse";
 import { ensureConversationSchema } from "@/lib/db/client";
 import { KnowledgeRetrievalError } from "@/lib/knowledge/errors";
 import { logError, logStep, previewText, redactSecrets, type LogDetails } from "@/lib/logging";
@@ -30,11 +38,12 @@ const STREAM_RESPONSE_HEADERS = {
 type PersistResult = "saved" | "empty" | "failed";
 
 export async function POST(request: Request) {
-  const userText = await readUserText(request);
-  if (userText instanceof Response) {
+  const chatRequest = await readChatRequest(request);
+  if (chatRequest instanceof Response) {
     logStep("对话请求没有通过校验");
-    return userText;
+    return chatRequest;
   }
+  const { userText, webSearch } = chatRequest;
 
   const encoder = new TextEncoder();
   const stopController = new AbortController();
@@ -49,9 +58,23 @@ export async function POST(request: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       const assistantParts: string[] = [];
+      const savedFiles: ExportLink[] = [];
+      let exportMarkersAdded = false;
       let phase: "prepare" | "model" | "persist" = "prepare";
       let finished = false;
       let persistTask: Promise<PersistResult> | null = null;
+
+      const appendExportMarkers = (): void => {
+        if (exportMarkersAdded || savedFiles.length === 0 || assistantParts.join("").length === 0) {
+          return;
+        }
+        exportMarkersAdded = true;
+        for (const file of savedFiles) {
+          const delta = exportMarkerLine(file);
+          assistantParts.push(delta);
+          enqueue(controller, encoder.encode(encodeDeltaEvent(delta)));
+        }
+      };
 
       const pushTrace = (step: string, summary?: LogDetails, detail?: unknown): void => {
         logStep(step, summary, detail);
@@ -66,8 +89,9 @@ export async function POST(request: Request) {
           用户字数: Array.from(userText).length,
           预览: previewText(userText, 40),
           模型: config.llmModel || "未配置",
+          允许联网: webSearch,
         },
-        { 会话: config.fixedThreadId, 内容: userText },
+        { 会话: config.fixedThreadId, 内容: userText, 允许联网: webSearch },
       );
 
       const persistVisibleTurn = (): Promise<PersistResult> => {
@@ -75,6 +99,7 @@ export async function POST(request: Request) {
           return persistTask;
         }
         persistTask = (async () => {
+          appendExportMarkers();
           const assistantText = assistantParts.join("");
           if (!assistantText) {
             return "empty";
@@ -191,6 +216,7 @@ export async function POST(request: Request) {
         for await (const event of iterAdvisorDeltas({
           history,
           userText,
+          webSearch,
           signal: stopController.signal,
         })) {
           if (stopController.signal.aborted) {
@@ -202,6 +228,23 @@ export async function POST(request: Request) {
             if (
               !enqueue(controller, encoder.encode(redactSecrets(encodeTraceEvent(event.step, event.detail))))
             ) {
+              await finishStopped();
+              return;
+            }
+            continue;
+          }
+
+          if (event.type === "tool") {
+            if (!enqueue(controller, encoder.encode(encodeToolEvent(event.phase, event.name, event.detail)))) {
+              await finishStopped();
+              return;
+            }
+            continue;
+          }
+
+          if (event.type === "file") {
+            savedFiles.push({ fileId: event.fileId, title: event.title });
+            if (!enqueue(controller, encoder.encode(encodeFileSavedEvent(event.fileId, event.title, event.bytes)))) {
               await finishStopped();
               return;
             }
@@ -311,6 +354,7 @@ function errorText(error: unknown): string {
   let message = error instanceof Error ? error.message : "unknown";
   for (const secret of [
     config.llmApiKey,
+    config.searchApiKey,
     (process.env.EMBEDDING_API_KEY ?? "").trim(),
     (process.env.RERANK_API_KEY ?? "").trim(),
   ]) {
@@ -335,7 +379,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-async function readUserText(request: Request): Promise<string | Response> {
+async function readChatRequest(request: Request): Promise<{ userText: string; webSearch: boolean } | Response> {
   let body: unknown;
   try {
     body = await request.json();
@@ -358,7 +402,11 @@ async function readUserText(request: Request): Promise<string | Response> {
   if (!userText) {
     return Response.json({ detail: "消息不能为空" }, { status: 422 });
   }
-  return userText;
+  const webSearch =
+    typeof body === "object" && body !== null && "webSearch" in body
+      ? (body as { webSearch: unknown }).webSearch === true
+      : false;
+  return { userText, webSearch };
 }
 
 function enqueue(controller: ReadableStreamDefaultController<Uint8Array>, bytes: Uint8Array): boolean {

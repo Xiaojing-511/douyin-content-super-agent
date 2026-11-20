@@ -77,9 +77,54 @@ body {
   line-height: 1.7;
 }
 
+.assistant-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tool-status {
+  margin: 0;
+  color: #737373;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.export-link {
+  color: #171717;
+  font-size: 14px;
+}
+
 .composer-wrap {
   padding: 8px 0 20px;
   background: #ffffff;
+}
+
+.composer-tools {
+  display: flex;
+  padding: 0 8px 8px;
+}
+
+.tool-toggle {
+  border: 1px solid #e5e5e5;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #ffffff;
+  color: #737373;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tool-toggle[aria-pressed="true"] {
+  background: #171717;
+  color: #ffffff;
+  border-color: #171717;
+}
+
+.tool-toggle:disabled {
+  cursor: default;
 }
 
 .error-notice {

@@ -7,12 +7,13 @@ import type { SendOutcome } from "@/components/useSingleConversation";
 interface ComposerProps {
   isStreaming: boolean;
   errorMessage: string;
-  onSend: (content: string) => Promise<SendOutcome>;
+  onSend: (content: string, options: { webSearch: boolean }) => Promise<SendOutcome>;
   onStop: () => void;
 }
 
 export function Composer({ isStreaming, errorMessage, onSend, onStop }: ComposerProps) {
   const [draft, setDraft] = useState("");
+  const [webSearch, setWebSearch] = useState(false);
 
   async function submitDraft() {
     const content = draft.trim();
@@ -20,7 +21,7 @@ export function Composer({ isStreaming, errorMessage, onSend, onStop }: Composer
       return;
     }
     setDraft("");
-    const outcome = await onSend(content);
+    const outcome = await onSend(content, { webSearch });
     if (outcome === "cancelled") {
       setDraft(content);
     }
@@ -41,6 +42,17 @@ export function Composer({ isStreaming, errorMessage, onSend, onStop }: Composer
   return (
     <form className="composer-wrap" onSubmit={handleSubmit}>
       {errorMessage ? <p className="error-notice">{errorMessage}</p> : null}
+      <div className="composer-tools">
+        <button
+          type="button"
+          className="tool-toggle"
+          aria-pressed={webSearch}
+          disabled={isStreaming}
+          onClick={() => setWebSearch((current) => !current)}
+        >
+          联网搜索
+        </button>
+      </div>
       <div className="composer">
         <textarea
           value={draft}

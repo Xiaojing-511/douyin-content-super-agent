@@ -20,7 +20,7 @@ import {
   streamReply,
 } from "@/components/conversationClient";
 import { clientLogger } from "@/components/clientLogger";
-import type { ConversationHistory, VisibleMessage } from "@/lib/conversation/types";
+import type { ConversationHistory, ExportLink, VisibleMessage } from "@/lib/conversation/types";
 
 export type SendOutcome = "completed" | "cancelled" | "failed";
 
@@ -33,7 +33,7 @@ interface SingleConversationState {
   errorMessage: string;
   isLoadingHistory: boolean;
   isStreaming: boolean;
-  sendMessage: (content: string) => Promise<SendOutcome>;
+  sendMessage: (content: string, options: { webSearch: boolean }) => Promise<SendOutcome>;
   stopGeneration: () => void;
 }
 
@@ -109,7 +109,7 @@ export function useSingleConversation(): SingleConversationState {
   }, []);
 
   const sendMessage = useCallback(
-    async (content: string): Promise<SendOutcome> => {
+    async (content: string, options: { webSearch: boolean }): Promise<SendOutcome> => {
       const trimmedContent = content.trim();
       if (!trimmedContent || isStreaming) {
         return "failed";
@@ -157,7 +157,24 @@ export function useSingleConversation(): SingleConversationState {
               setMessages((currentMessages) =>
                 currentMessages.map((message) =>
                   message.localKey === EMPTY_ASSISTANT_LOCAL_KEY
-                    ? { ...message, content: message.content + deltaText }
+                    ? { ...message, content: message.content + deltaText, activity: undefined }
+                    : message,
+                ),
+              );
+            },
+            onTool: (tool) => {
+              const activity = toolActivity(tool.phase, tool.name, tool.detail);
+              setMessages((currentMessages) =>
+                currentMessages.map((message) =>
+                  message.localKey === EMPTY_ASSISTANT_LOCAL_KEY ? { ...message, activity } : message,
+                ),
+              );
+            },
+            onFile: (file) => {
+              setMessages((currentMessages) =>
+                currentMessages.map((message) =>
+                  message.localKey === EMPTY_ASSISTANT_LOCAL_KEY
+                    ? { ...message, exports: addExport(message.exports, file) }
                     : message,
                 ),
               );
@@ -176,6 +193,7 @@ export function useSingleConversation(): SingleConversationState {
           },
           stopController.signal,
           () => stopRequestedRef.current,
+          options.webSearch,
         );
         if (streamWasPersisted) {
           try {
@@ -284,6 +302,27 @@ async function settleInterruptedTurn(
       : "这一轮没有保存。连接在结束前断开了。",
   );
   return "failed";
+}
+
+function toolActivity(phase: string, name: string, detail: string): string | undefined {
+  if (phase !== "call") {
+    return undefined;
+  }
+  if (name === "web_search") {
+    return detail ? `正在联网搜索：${detail}` : "正在联网搜索";
+  }
+  if (name === "export_pdf") {
+    return "正在生成 PDF";
+  }
+  return "正在调用工具";
+}
+
+function addExport(current: ExportLink[] | undefined, file: ExportLink): ExportLink[] {
+  const existing = current ?? [];
+  if (existing.some((item) => item.fileId === file.fileId)) {
+    return existing;
+  }
+  return [...existing, file];
 }
 
 function wait(milliseconds: number): Promise<void> {

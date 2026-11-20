@@ -10,7 +10,7 @@ interface ChatColumnProps {
   errorMessage: string;
   isLoadingHistory: boolean;
   isStreaming: boolean;
-  onSend: (content: string) => Promise<SendOutcome>;
+  onSend: (content: string, options: { webSearch: boolean }) => Promise<SendOutcome>;
   onStop: () => void;
 }
 

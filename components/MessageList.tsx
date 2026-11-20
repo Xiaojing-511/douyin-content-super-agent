@@ -2,7 +2,8 @@
 
 import { useEffect, useRef } from "react";
 
-import type { VisibleMessage } from "@/lib/conversation/types";
+import { dedupeExportLinks, splitExportMarkers } from "@/lib/exports/marker";
+import type { ExportLink, VisibleMessage } from "@/lib/conversation/types";
 
 interface MessageListProps {
   messages: VisibleMessage[];
@@ -37,12 +38,32 @@ export function MessageList({ messages, isLoadingHistory, hasConnectionError }: 
             <p className="user-bubble">{message.content}</p>
           </div>
         ) : (
-          <p key={message.localKey} className="assistant-text">
-            {message.content}
-          </p>
+          <AssistantMessage key={message.localKey} message={message} />
         ),
       )}
       <div ref={bottomMarkerRef} />
     </div>
+  );
+}
+
+function AssistantMessage({ message }: { message: VisibleMessage }) {
+  const parsed = splitExportMarkers(message.content);
+  const files = dedupeExportLinks([...(message.exports ?? []), ...parsed.files]);
+  return (
+    <div className="assistant-block">
+      {parsed.body ? <p className="assistant-text">{parsed.body}</p> : null}
+      {message.activity ? <p className="tool-status">{message.activity}</p> : null}
+      {files.map((file) => (
+        <ExportLinkView key={file.fileId} file={file} />
+      ))}
+    </div>
+  );
+}
+
+function ExportLinkView({ file }: { file: ExportLink }) {
+  return (
+    <a className="export-link" href={`/api/exports/${file.fileId}`} download={`${file.title}.pdf`}>
+      下载 PDF：{file.title}
+    </a>
   );
 }
