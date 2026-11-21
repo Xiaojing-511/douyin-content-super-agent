@@ -1,13 +1,14 @@
-# Next.js 在本机运行。这里只提供 Postgres。
-# 镜像选用 pgvector，是为了后面的方法卡向量索引不用再换数据库。
-# 消息表不使用向量列。
+# 本机开发：docker compose up -d
+#   只启动 Postgres。Next.js 仍在宿主机执行 npm run dev，DATABASE_URL 继续用 localhost。
+# 云服务器：docker compose --profile app up -d --build
+#   同时启动应用和数据库。应用容器里的 DATABASE_URL 指向服务名 postgres。
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: advisor
-      POSTGRES_PASSWORD: advisor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-advisor}
       POSTGRES_DB: advisor
     ports:
       - "5432:5432"
@@ -19,6 +20,52 @@ services:
       interval: 2s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
+
+  app:
+    profiles: ["app"]
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://advisor:${POSTGRES_PASSWORD:-advisor}@postgres:5432/advisor
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FIXED_THREAD_ID: ${FIXED_THREAD_ID:-single-advisor-session}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_API_KEY: ${RERANK_API_KEY:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
+      SEARCH_BASE_URL: ${SEARCH_BASE_URL:-https://qianfan.baidubce.com}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      PDF_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+      PDF_FONT_FAMILY: NotoSansCJK-Regular
+    volumes:
+      - advisor_exports:/app/data/exports
+      - ./prompt:/app/prompt:ro
+      - ./rag:/app/rag:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then((r)=>r.json()).then((b)=>process.exit(b.database==='ok'?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
 
 volumes:
   advisor_postgres_data:
+  advisor_exports:

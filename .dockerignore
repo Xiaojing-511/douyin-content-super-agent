@@ -1,0 +1,11 @@
+.git
+.cursor
+node_modules
+.next
+data
+doc
+.env
+.env.local
+*.log
+.DS_Store
+npm-debug.log*
