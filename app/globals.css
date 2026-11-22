@@ -24,7 +24,17 @@ body {
 }
 
 .chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   padding: 18px 0 8px;
+}
+
+.site-logo {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
 }
 
 .chat-header h1 {
@@ -71,6 +81,23 @@ body {
   line-height: 1.6;
 }
 
+.assistant-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.assistant-avatar {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  margin-top: 2px;
+  border: 1px solid #e5e5e5;
+  border-radius: 50%;
+  object-fit: contain;
+  background: #ffffff;
+}
+
 .assistant-text {
   margin: 0;
   white-space: pre-wrap;
@@ -79,9 +106,11 @@ body {
 
 .assistant-block {
   display: flex;
+  flex: 1;
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
+  min-width: 0;
 }
 
 .tool-status {

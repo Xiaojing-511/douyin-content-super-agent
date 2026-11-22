@@ -50,12 +50,15 @@ function AssistantMessage({ message }: { message: VisibleMessage }) {
   const parsed = splitExportMarkers(message.content);
   const files = dedupeExportLinks([...(message.exports ?? []), ...parsed.files]);
   return (
-    <div className="assistant-block">
-      {parsed.body ? <p className="assistant-text">{parsed.body}</p> : null}
-      {message.activity ? <p className="tool-status">{message.activity}</p> : null}
-      {files.map((file) => (
-        <ExportLinkView key={file.fileId} file={file} />
-      ))}
+    <div className="assistant-row">
+      <img className="assistant-avatar" src="/cat-logo.png" alt="" width={32} height={32} />
+      <div className="assistant-block">
+        {parsed.body ? <p className="assistant-text">{parsed.body}</p> : null}
+        {message.activity ? <p className="tool-status">{message.activity}</p> : null}
+        {files.map((file) => (
+          <ExportLinkView key={file.fileId} file={file} />
+        ))}
+      </div>
     </div>
   );
 }

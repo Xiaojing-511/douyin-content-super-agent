@@ -25,6 +25,7 @@ export function ChatColumn({
   return (
     <main className="chat-column">
       <header className="chat-header">
+        <img className="site-logo" src="/cat-logo.png" alt="" width={36} height={36} />
         <h1>关系认知顾问</h1>
       </header>
       <section className="chat-scroll" aria-live="polite">

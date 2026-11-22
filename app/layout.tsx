@@ -3,6 +3,9 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "关系认知顾问",
+  icons: {
+    icon: "/cat-logo.png",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
