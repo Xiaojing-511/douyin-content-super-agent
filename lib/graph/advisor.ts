@@ -21,11 +21,11 @@ import type { LangGraphRunnableConfig } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 
 import { config } from "@/lib/config";
-import type { ConversationMessage } from "@/lib/conversation/types";
+import type { ConversationMessage, ProcessStep } from "@/lib/conversation/types";
 import { getCheckpointer } from "@/lib/graph/checkpoint";
 import { loadAdvisorSystemPrompt } from "@/lib/graph/load-system-prompt";
 import { createChatModel } from "@/lib/graph/model";
-import { toolsFor } from "@/lib/tools/advisor-tools";
+import { toolsFor, type ToolPolicy } from "@/lib/tools/advisor-tools";
 import { buildSearchQuery, renderKnowledgeContext, type RetrievedChunk } from "@/lib/knowledge/context";
 import { searchKnowledge, type KnowledgeTrace } from "@/lib/knowledge/search";
 import { readEmbeddingSettings } from "@/lib/knowledge/settings";
@@ -36,8 +36,8 @@ import { logStep, previewText, type LogDetails } from "@/lib/logging";
  *
  * 有 tool_calls 就执行工具，再回到模型。没有 tool_calls 时，这条正文才是给用户的回复。
  * 消息在图里追加，这样一轮里的工具结果还在。每一轮开始时先清空 checkpoint，再用消息表重建历史。
- * 工具消息不写入 conversation_messages。
- * 检索、模型请求和工具会打出中文日志，并把同一步发给浏览器控制台。
+ * 工具消息不写入 conversation_messages。短步骤通过 status 和 tool 送到页面，结束时写入助手行的 process。
+ * 下一轮提示只读 content。检索、模型请求和工具会打出中文日志，并把同一步发给浏览器控制台。
  * 中止时路由会把已经推到页面上的半截回复写入消息表。一个字都还没推出去就中止的，消息表里没有这一轮。
  */
 
@@ -52,9 +52,9 @@ const AdvisorState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => [],
   }),
-  toolPolicy: Annotation<{ webSearch: boolean }>({
+  toolPolicy: Annotation<ToolPolicy>({
     reducer: (_current, update) => update,
-    default: () => ({ webSearch: false }),
+    default: () => ({ webSearch: false, threadId: "" }),
   }),
   toolRound: Annotation<number>({
     reducer: (_current, update) => update,
@@ -103,7 +103,21 @@ async function retrieveNode(
     { 问句字数: Array.from(query).length, 预览: previewText(query, 40) },
     { 检索问句: query },
   );
-  const knowledge = await searchKnowledge(query, runConfig.signal, report);
+  let knowledge: RetrievedChunk[];
+  try {
+    knowledge = await searchKnowledge(query, runConfig.signal, report);
+  } catch (error: unknown) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    emitStatus(runConfig, {
+      id: "knowledge",
+      state: "failed",
+      title: "查阅知识库",
+      detail: "没有完成",
+    });
+    throw error;
+  }
   report(
     "这些片段会放进本轮提示",
     {
@@ -113,6 +127,14 @@ async function retrieveNode(
     },
     { 片段: knowledge.map(describeRetrievedChunk) },
   );
+  if (knowledge.length > 0) {
+    emitStatus(runConfig, {
+      id: "knowledge",
+      state: "done",
+      title: "查阅知识库",
+      detail: `找到 ${knowledge.length} 段`,
+    });
+  }
   return { knowledge };
 }
 
@@ -155,13 +177,16 @@ async function advisorNode(
   if (calls.length > 0) {
     const names = calls.map((call) => call.name).join("、");
     reportTrace(runConfig, "模型决定调用工具", { 工具: names, 已用工具轮次: state.toolRound });
-    writer({
-      tool: {
-        phase: "call",
-        name: calls[0]?.name ?? "tool",
-        detail: toolCallDetail(calls),
-      },
-    });
+    for (const call of calls) {
+      writer({
+        tool: {
+          id: call.id && call.id.length > 0 ? call.id : call.name,
+          phase: "call",
+          name: call.name,
+          detail: call.name === "web_search" && typeof call.args.query === "string" ? previewText(call.args.query, 40) : "",
+        },
+      });
+    }
     return { messages: [reply] };
   }
   if (!reply.text.trim()) {
@@ -194,19 +219,20 @@ async function toolsNode(
     ToolMessage.isInstance(message),
   );
   for (const message of toolMessages) {
-    const failed = message.status === "error";
+    const outcome = toolOutcome(message);
     const content = typeof message.content === "string" ? message.content : "";
     reportTrace(
       runConfig,
-      failed ? "工具执行失败" : "工具执行完成",
+      outcome.failed ? "工具执行失败" : "工具执行完成",
       { 工具: message.name ?? "", 预览: previewText(content, 80) },
       { 工具: message.name ?? "", 结果: content },
     );
     runConfig.writer?.({
       tool: {
-        phase: failed ? "error" : "done",
+        id: message.tool_call_id || message.name || "tool",
+        phase: outcome.failed ? "error" : "done",
         name: message.name ?? "tool",
-        detail: "",
+        detail: outcome.detail,
       },
     });
     const saved = readSavedPdf(message);
@@ -228,6 +254,12 @@ async function forceReplyNode(
   if (!runConfig.writer) {
     throw new Error("模型流没有接到页面");
   }
+  emitStatus(runConfig, {
+    id: "limit",
+    state: "done",
+    title: "工具次数已用完",
+    detail: "改为直接写口播",
+  });
   const last = state.messages.at(-1);
   const pending = AIMessage.isInstance(last) ? (last.tool_calls ?? []) : [];
   const fillers = pending.map(
@@ -299,13 +331,15 @@ async function getAdvisorGraph(): Promise<AdvisorGraph> {
 export type AdvisorStreamEvent =
   | { type: "delta"; delta: string }
   | { type: "trace"; step: string; detail?: unknown }
-  | { type: "tool"; phase: "call" | "done" | "error"; name: string; detail: string }
+  | { type: "status"; step: ProcessStep }
+  | { type: "tool"; id: string; phase: "call" | "done" | "error"; name: string; detail: string }
   | { type: "file"; fileId: string; title: string; bytes: number };
 
 export async function* iterAdvisorDeltas(input: {
   history: ConversationMessage[];
   userText: string;
   webSearch: boolean;
+  threadId: string;
   signal: AbortSignal;
 }): AsyncGenerator<AdvisorStreamEvent> {
   const graph = await getAdvisorGraph();
@@ -316,11 +350,11 @@ export async function* iterAdvisorDeltas(input: {
         ...input.history.map(toLangChainMessage),
         new HumanMessage({ content: input.userText }),
       ],
-      toolPolicy: { webSearch: input.webSearch },
+      toolPolicy: { webSearch: input.webSearch, threadId: input.threadId },
       toolRound: 0,
     },
     {
-      configurable: { thread_id: config.fixedThreadId },
+      configurable: { thread_id: input.threadId },
       streamMode: "custom",
       signal: input.signal,
       recursionLimit: 12,
@@ -393,13 +427,51 @@ function emitText(runConfig: LangGraphRunnableConfig, text: string): void {
   }
 }
 
-function toolCallDetail(calls: NonNullable<AIMessage["tool_calls"]>): string {
-  const search = calls.find((call) => call.name === "web_search");
-  const query = search && typeof search.args.query === "string" ? search.args.query : "";
-  if (query) {
-    return previewText(query, 40);
+function emitStatus(runConfig: LangGraphRunnableConfig, step: ProcessStep): void {
+  runConfig.writer?.({ status: step });
+}
+
+function toolOutcome(message: ToolMessage): { failed: boolean; detail: string } {
+  if (message.status === "error") {
+    return { failed: true, detail: "这次调用没有执行，继续写口播" };
   }
-  return calls.map((call) => call.name).join("、");
+  const payload = readToolPayload(message);
+  if (payload?.ok === false) {
+    const reason = typeof payload.reason === "string" ? payload.reason : "";
+    if (message.name === "export_pdf") {
+      return { failed: true, detail: "没有生成，继续写口播" };
+    }
+    if (reason.includes("SEARCH_API_KEY") || reason.includes("不能联网")) {
+      return { failed: true, detail: "这一轮不能联网，继续写口播" };
+    }
+    return { failed: true, detail: "没有结果，继续写口播" };
+  }
+  if (message.name === "export_pdf") {
+    return { failed: false, detail: "已生成" };
+  }
+  if (message.name === "web_search") {
+    return { failed: false, detail: "已返回" };
+  }
+  return { failed: false, detail: "" };
+}
+
+function readToolPayload(message: ToolMessage): { ok?: unknown; reason?: unknown } | null {
+  if (typeof message.content !== "string") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(message.content) as unknown;
+    if (typeof parsed === "object" && parsed !== null) {
+      return parsed as { ok?: unknown; reason?: unknown };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function readSavedPdf(message: ToolMessage): { fileId: string; title: string; bytes: number } | null {
@@ -468,6 +540,7 @@ function describeModelMessage(message: BaseMessage): { 角色: string; 内容: s
 }
 
 function toLangChainMessage(message: ConversationMessage): BaseMessage {
+  // process 只给页面画过程条，不进入模型上下文。
   if (message.role === "user") {
     return new HumanMessage({ content: message.content });
   }
@@ -488,14 +561,40 @@ function readCustomChunk(chunk: unknown): AdvisorStreamEvent | null {
       }
     }
   }
+  if ("status" in chunk) {
+    const status = (chunk as { status?: unknown }).status;
+    if (typeof status === "object" && status !== null) {
+      const id = (status as { id?: unknown }).id;
+      const state = (status as { state?: unknown }).state;
+      const title = (status as { title?: unknown }).title;
+      const detail = (status as { detail?: unknown }).detail;
+      if (
+        typeof id === "string" &&
+        (state === "running" || state === "done" || state === "failed" || state === "stopped") &&
+        typeof title === "string"
+      ) {
+        return {
+          type: "status",
+          step: { id, state, title, detail: typeof detail === "string" ? detail : "" },
+        };
+      }
+    }
+  }
   if ("tool" in chunk) {
     const toolEvent = (chunk as { tool?: unknown }).tool;
     if (typeof toolEvent === "object" && toolEvent !== null && "phase" in toolEvent && "name" in toolEvent) {
       const phase = (toolEvent as { phase?: unknown }).phase;
       const name = (toolEvent as { name?: unknown }).name;
       const detail = (toolEvent as { detail?: unknown }).detail;
+      const id = (toolEvent as { id?: unknown }).id;
       if ((phase === "call" || phase === "done" || phase === "error") && typeof name === "string") {
-        return { type: "tool", phase, name, detail: typeof detail === "string" ? detail : "" };
+        return {
+          type: "tool",
+          id: typeof id === "string" && id.length > 0 ? id : name,
+          phase,
+          name,
+          detail: typeof detail === "string" ? detail : "",
+        };
       }
     }
   }

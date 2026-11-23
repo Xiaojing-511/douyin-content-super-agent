@@ -3,7 +3,7 @@ import "server-only";
 import path from "node:path";
 
 /**
- * 这里读取会改变当前对话的值：数据库地址、日志级别、固定会话编号、主模型，以及联网搜索和 PDF。
+ * 这里读取会改变当前对话的值：数据库地址、日志级别、主模型，以及联网搜索和 PDF。
  * 小模型和外部 PDF 命令留在环境文件里，这里还不读取。
  * 嵌入模型和重排模型由 lib/knowledge/settings.ts 在灌库和检索时读取。
  * 重排三项都留空时，检索只按向量距离排序。
@@ -20,7 +20,6 @@ function databaseUrlFromEnvironment(): string {
 export const config = {
   databaseUrl: databaseUrlFromEnvironment(),
   logLevel: (process.env.LOG_LEVEL ?? "INFO").toUpperCase(),
-  fixedThreadId: process.env.FIXED_THREAD_ID ?? "single-advisor-session",
   llmBaseUrl: (process.env.LLM_BASE_URL ?? "").trim(),
   llmApiKey: (process.env.LLM_API_KEY ?? "").trim(),
   llmModel: (process.env.LLM_MODEL ?? "").trim(),

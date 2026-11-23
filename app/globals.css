@@ -113,11 +113,60 @@ body {
   min-width: 0;
 }
 
-.tool-status {
-  margin: 0;
+.process {
+  width: 100%;
   color: #737373;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.process-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.process-chevron {
+  width: 0.8em;
+  flex: none;
+}
+
+.process-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.process-list li {
+  display: flex;
+  gap: 8px;
+}
+
+.process-mark {
+  width: 1em;
+  flex: none;
+}
+
+.process-running .process-mark {
+  animation: process-pulse 1.2s ease-in-out infinite;
+}
+
+.process-detail {
+  display: block;
+}
+
+@keyframes process-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .export-link {

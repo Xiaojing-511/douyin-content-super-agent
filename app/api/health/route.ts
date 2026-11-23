@@ -1,4 +1,3 @@
-import { config } from "@/lib/config";
 import { pingDatabase } from "@/lib/db/client";
 import { logError, logInfo } from "@/lib/logging";
 
@@ -20,12 +19,10 @@ export async function GET() {
   logInfo("健康检查完成", {
     状态: overallStatus,
     数据库: databaseStatus,
-    会话: config.fixedThreadId,
   });
 
   return Response.json({
     status: overallStatus,
     database: databaseStatus,
-    fixedThreadId: config.fixedThreadId,
   });
 }

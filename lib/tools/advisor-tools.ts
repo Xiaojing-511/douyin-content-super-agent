@@ -28,37 +28,47 @@ const webSearchTool = tool(
   },
 );
 
-const exportPdfTool = tool(
-  async ({ title, markdown }, runtime) => {
-    try {
-      const written = await writeExportPdf({ title, markdown, signal: runtime.signal });
-      return JSON.stringify({
-        ok: true,
-        fileId: written.fileId,
-        title: written.title,
-        bytes: written.bytes,
-        note: "文件已生成。最终回复仍然要写出完整口播，不要只说已导出。",
-      });
-    } catch (error: unknown) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw error;
+const exportPdfSchema = z.object({
+  title: z.string().min(1).max(40).describe("PDF 标题"),
+  markdown: z.string().min(1).max(6000).describe("已经写完的完整口播"),
+});
+
+export interface ToolPolicy {
+  webSearch: boolean;
+  threadId: string;
+}
+
+function exportPdfTool(threadId: string): StructuredToolInterface {
+  return tool(
+    async ({ title, markdown }, runtime) => {
+      try {
+        const written = await writeExportPdf({ title, markdown, signal: runtime.signal, threadId });
+        return JSON.stringify({
+          ok: true,
+          fileId: written.fileId,
+          title: written.title,
+          bytes: written.bytes,
+          note: "文件已生成。最终回复仍然要写出完整口播，不要只说已导出。",
+        });
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw error;
+        }
+        const reason = error instanceof Error ? error.message : "PDF 没有生成";
+        return JSON.stringify({ ok: false, reason });
       }
-      const reason = error instanceof Error ? error.message : "PDF 没有生成";
-      return JSON.stringify({ ok: false, reason });
-    }
-  },
-  {
-    name: "export_pdf",
-    description:
-      "用户明确要求把口播导出为 PDF 时调用。title 是短标题，markdown 是已经写完的完整口播。调用后最终回复仍要写出这段口播，不要只说已导出。",
-    schema: z.object({
-      title: z.string().min(1).max(40).describe("PDF 标题"),
-      markdown: z.string().min(1).max(6000).describe("已经写完的完整口播"),
-    }),
-  },
-);
+    },
+    {
+      name: "export_pdf",
+      description:
+        "用户明确要求把口播导出为 PDF 时调用。title 是短标题，markdown 是已经写完的完整口播。调用后最终回复仍要写出这段口播，不要只说已导出。",
+      schema: exportPdfSchema,
+    },
+  );
+}
 
 /** 联网开关关掉时，模型看不到 web_search。导出始终在列表里，由模型决定是否调用。 */
-export function toolsFor(policy: { webSearch: boolean }): StructuredToolInterface[] {
-  return policy.webSearch ? [webSearchTool, exportPdfTool] : [exportPdfTool];
+export function toolsFor(policy: ToolPolicy): StructuredToolInterface[] {
+  const pdf = exportPdfTool(policy.threadId);
+  return policy.webSearch ? [webSearchTool, pdf] : [pdf];
 }

@@ -14,7 +14,7 @@ import * as schema from "@/lib/db/schema";
 
 const globalForDatabase = globalThis as unknown as {
   advisorSql?: postgres.Sql;
-  advisorSchemaReady?: Promise<void>;
+  conversationSchemaReady?: Promise<void>;
 };
 
 function sqlClient(): postgres.Sql {
@@ -40,13 +40,13 @@ export function getSqlClient(): postgres.Sql {
 }
 
 export async function ensureConversationSchema(): Promise<void> {
-  if (!globalForDatabase.advisorSchemaReady) {
-    globalForDatabase.advisorSchemaReady = createConversationSchema().catch((error: unknown) => {
-      globalForDatabase.advisorSchemaReady = undefined;
+  if (!globalForDatabase.conversationSchemaReady) {
+    globalForDatabase.conversationSchemaReady = createConversationSchema().catch((error: unknown) => {
+      globalForDatabase.conversationSchemaReady = undefined;
       throw error;
     });
   }
-  await globalForDatabase.advisorSchemaReady;
+  await globalForDatabase.conversationSchemaReady;
 }
 
 async function createConversationSchema(): Promise<void> {
@@ -57,8 +57,13 @@ async function createConversationSchema(): Promise<void> {
       thread_id varchar(64) NOT NULL,
       role varchar(16) NOT NULL,
       content text NOT NULL,
+      process jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
     )
+  `);
+  await sql.unsafe(`
+    ALTER TABLE conversation_messages
+      ADD COLUMN IF NOT EXISTS process jsonb
   `);
   await sql.unsafe(`
     CREATE INDEX IF NOT EXISTS ix_conversation_messages_thread_id_id

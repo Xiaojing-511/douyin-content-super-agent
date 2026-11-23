@@ -7,6 +7,7 @@ import path from "node:path";
 import PDFDocument from "pdfkit";
 
 import { config } from "@/lib/config";
+import { isVisitorId } from "@/lib/conversation/visitor";
 import { sanitizeExportTitle } from "@/lib/exports/marker";
 import { exportFileId, resolveExportPdfPath } from "@/lib/exports/files";
 
@@ -26,9 +27,13 @@ export async function writeExportPdf(input: {
   title: string;
   markdown: string;
   signal: AbortSignal | undefined;
+  threadId: string;
 }): Promise<WrittenPdf> {
   if (input.signal?.aborted) {
     throw new DOMException("模型回复已取消", "AbortError");
+  }
+  if (!isVisitorId(input.threadId)) {
+    throw new Error("导出会话无效");
   }
   const title = sanitizeExportTitle(input.title);
   const markdown = input.markdown.replace(/\r\n/g, "\n").trim();
@@ -37,7 +42,7 @@ export async function writeExportPdf(input: {
   }
   const font = resolvePdfFont();
   const fileId = exportFileId(title, markdown);
-  const finalPath = resolveExportPdfPath(config.exportRoot, config.fixedThreadId, fileId);
+  const finalPath = resolveExportPdfPath(config.exportRoot, input.threadId, fileId);
   const partialPath = `${finalPath}.partial`;
   await mkdir(path.dirname(finalPath), { recursive: true });
 

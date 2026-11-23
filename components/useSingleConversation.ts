@@ -20,7 +20,8 @@ import {
   streamReply,
 } from "@/components/conversationClient";
 import { clientLogger } from "@/components/clientLogger";
-import type { ConversationHistory, ExportLink, VisibleMessage } from "@/lib/conversation/types";
+import { parseProcessStep, stepFromTool, upsertProcessStep, writeStep } from "@/lib/conversation/process";
+import type { ConversationHistory, ExportLink, ProcessStep, VisibleMessage } from "@/lib/conversation/types";
 
 export type SendOutcome = "completed" | "cancelled" | "failed";
 
@@ -53,10 +54,10 @@ export function useSingleConversation(): SingleConversationState {
         localKey: `saved-${message.id}`,
         role: message.role,
         content: message.content,
+        process: message.process ?? undefined,
       })),
     );
     clientLogger.info("页面已换成数据库里的对话", {
-      会话: history.threadId,
       条数: history.messages.length,
       消息: history.messages.map((message) => ({
         角色: message.role === "user" ? "用户" : "顾问",
@@ -134,6 +135,7 @@ export function useSingleConversation(): SingleConversationState {
           localKey: EMPTY_ASSISTANT_LOCAL_KEY,
           role: "assistant",
           content: "",
+          live: true,
         },
       ]);
       clientLogger.info("页面开始发送，先放上用户消息", {
@@ -157,18 +159,24 @@ export function useSingleConversation(): SingleConversationState {
               setMessages((currentMessages) =>
                 currentMessages.map((message) =>
                   message.localKey === EMPTY_ASSISTANT_LOCAL_KEY
-                    ? { ...message, content: message.content + deltaText, activity: undefined }
+                    ? {
+                        ...message,
+                        content: message.content + deltaText,
+                        process: upsertProcessStep(message.process ?? [], writeStep()),
+                      }
                     : message,
                 ),
               );
             },
+            onStatus: (status) => {
+              const step = parseProcessStep(status);
+              if (!step) {
+                return;
+              }
+              setMessages((currentMessages) => updateStreamingProcess(currentMessages, step));
+            },
             onTool: (tool) => {
-              const activity = toolActivity(tool.phase, tool.name, tool.detail);
-              setMessages((currentMessages) =>
-                currentMessages.map((message) =>
-                  message.localKey === EMPTY_ASSISTANT_LOCAL_KEY ? { ...message, activity } : message,
-                ),
-              );
+              setMessages((currentMessages) => updateStreamingProcess(currentMessages, stepFromTool(tool)));
             },
             onFile: (file) => {
               setMessages((currentMessages) =>
@@ -233,6 +241,11 @@ export function useSingleConversation(): SingleConversationState {
         if (stopControllerRef.current === stopController) {
           stopControllerRef.current = null;
         }
+        setMessages((currentMessages) =>
+          currentMessages.map((message) =>
+            message.localKey === EMPTY_ASSISTANT_LOCAL_KEY ? { ...message, live: false } : message,
+          ),
+        );
         setIsStreaming(false);
       }
     },
@@ -304,17 +317,12 @@ async function settleInterruptedTurn(
   return "failed";
 }
 
-function toolActivity(phase: string, name: string, detail: string): string | undefined {
-  if (phase !== "call") {
-    return undefined;
-  }
-  if (name === "web_search") {
-    return detail ? `正在联网搜索：${detail}` : "正在联网搜索";
-  }
-  if (name === "export_pdf") {
-    return "正在生成 PDF";
-  }
-  return "正在调用工具";
+function updateStreamingProcess(currentMessages: VisibleMessage[], step: ProcessStep): VisibleMessage[] {
+  return currentMessages.map((message) =>
+    message.localKey === EMPTY_ASSISTANT_LOCAL_KEY
+      ? { ...message, process: upsertProcessStep(message.process ?? [], step) }
+      : message,
+  );
 }
 
 function addExport(current: ExportLink[] | undefined, file: ExportLink): ExportLink[] {

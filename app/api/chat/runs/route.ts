@@ -1,6 +1,8 @@
 import { config, missingModelSettingNames } from "@/lib/config";
 import { ensureAdvisorGraph, iterAdvisorDeltas } from "@/lib/graph/advisor";
 import { beginActiveChatRun, endActiveChatRun } from "@/lib/conversation/active-run";
+import { openVisitor, withVisitorCookie } from "@/lib/conversation/visitor";
+import { processToStore, stepFromTool, upsertProcessStep } from "@/lib/conversation/process";
 import { appendCompletedTurn, listMessages } from "@/lib/conversation/repository";
 import { exportMarkerLine, type ExportLink } from "@/lib/exports/marker";
 import {
@@ -8,9 +10,11 @@ import {
   encodeDoneEvent,
   encodeErrorEvent,
   encodeFileSavedEvent,
+  encodeStatusEvent,
   encodeToolEvent,
   encodeTraceEvent,
 } from "@/lib/conversation/sse";
+import type { ProcessStep } from "@/lib/conversation/types";
 import { ensureConversationSchema } from "@/lib/db/client";
 import { KnowledgeRetrievalError } from "@/lib/knowledge/errors";
 import { logError, logStep, previewText, redactSecrets, type LogDetails } from "@/lib/logging";
@@ -21,6 +25,7 @@ import { logError, logStep, previewText, redactSecrets, type LogDetails } from "
  * 一个字都还没推出去就停的，不写库。
  * 模型未配置时只发 error，不调用模型，也不写库。历史接口不依赖这三项配置。
  * 每一步另发 trace，浏览器控制台能看到请求和检索内容。trace 不写入对话。
+ * status 和 tool 收成过程条，和正文一起写入助手行的 process。
  */
 
 export const runtime = "nodejs";
@@ -38,17 +43,22 @@ const STREAM_RESPONSE_HEADERS = {
 type PersistResult = "saved" | "empty" | "failed";
 
 export async function POST(request: Request) {
+  const visitor = openVisitor(request);
+  const threadId = visitor.threadId;
   const chatRequest = await readChatRequest(request);
   if (chatRequest instanceof Response) {
     logStep("对话请求没有通过校验");
-    return chatRequest;
+    return withVisitorCookie(chatRequest, visitor);
   }
   const { userText, webSearch } = chatRequest;
 
   const encoder = new TextEncoder();
   const stopController = new AbortController();
   const stopThisRun = () => stopController.abort();
-  beginActiveChatRun(config.fixedThreadId, stopThisRun);
+  if (!beginActiveChatRun(threadId, stopThisRun)) {
+    logStep("上一轮还在生成", { 会话: threadId });
+    return withVisitorCookie(Response.json({ detail: "上一轮还在生成" }, { status: 409 }), visitor);
+  }
   const stopWhenRequestEnds = () => stopController.abort();
   request.signal.addEventListener("abort", stopWhenRequestEnds);
   if (request.signal.aborted) {
@@ -59,6 +69,7 @@ export async function POST(request: Request) {
     async start(controller) {
       const assistantParts: string[] = [];
       const savedFiles: ExportLink[] = [];
+      let processSteps: ProcessStep[] = [];
       let exportMarkersAdded = false;
       let phase: "prepare" | "model" | "persist" = "prepare";
       let finished = false;
@@ -85,13 +96,13 @@ export async function POST(request: Request) {
       pushTrace(
         "收到对话请求",
         {
-          会话: config.fixedThreadId,
+          会话: threadId,
           用户字数: Array.from(userText).length,
           预览: previewText(userText, 40),
           模型: config.llmModel || "未配置",
           允许联网: webSearch,
         },
-        { 会话: config.fixedThreadId, 内容: userText, 允许联网: webSearch },
+        { 会话: threadId, 内容: userText, 允许联网: webSearch },
       );
 
       const persistVisibleTurn = (): Promise<PersistResult> => {
@@ -109,7 +120,7 @@ export async function POST(request: Request) {
             pushTrace(
               "开始把本轮写入数据库",
               {
-                会话: config.fixedThreadId,
+                会话: threadId,
                 是否提前停止: stopController.signal.aborted,
                 回复字数: Array.from(assistantText).length,
               },
@@ -119,12 +130,17 @@ export async function POST(request: Request) {
                 回复: assistantText,
               },
             );
-            await appendCompletedTurn(userText, assistantText);
+            await appendCompletedTurn(
+              threadId,
+              userText,
+              assistantText,
+              processToStore(processSteps, stopController.signal.aborted),
+            );
             return "saved";
           } catch (error: unknown) {
             const reason = errorText(error);
             logError("本轮写入数据库失败", {
-              会话: config.fixedThreadId,
+              会话: threadId,
               增量段数: assistantParts.length,
               原因: reason,
             });
@@ -146,13 +162,13 @@ export async function POST(request: Request) {
           pushTrace(
             clientGone ? "浏览器断开，已保存页面上看得到的回复" : "生成已停止，已保存页面上看得到的回复",
             {
-              会话: config.fixedThreadId,
+              会话: threadId,
               增量段数: assistantParts.length,
               回复字数: Array.from(assistantParts.join("")).length,
             },
           );
           if (!clientGone) {
-            enqueue(controller, encoder.encode(encodeDoneEvent(config.fixedThreadId)));
+            enqueue(controller, encoder.encode(encodeDoneEvent()));
           }
         } else if (result === "failed") {
           if (!clientGone) {
@@ -164,7 +180,7 @@ export async function POST(request: Request) {
             );
           }
         } else {
-          pushTrace("生成在出现文字前就停了，这一轮不保存", { 会话: config.fixedThreadId });
+          pushTrace("生成在出现文字前就停了，这一轮不保存", { 会话: threadId });
         }
         closeQuietly(controller);
       };
@@ -190,8 +206,8 @@ export async function POST(request: Request) {
 
         await ensureConversationSchema();
         await ensureAdvisorGraph();
-        pushTrace("开始读取已保存的历史", { 会话: config.fixedThreadId });
-        const history = await listMessages();
+        pushTrace("开始读取已保存的历史", { 会话: threadId });
+        const history = await listMessages(threadId);
         pushTrace(
           "已读取历史，准备检索和回复",
           { 条数: history.length },
@@ -217,6 +233,7 @@ export async function POST(request: Request) {
           history,
           userText,
           webSearch,
+          threadId,
           signal: stopController.signal,
         })) {
           if (stopController.signal.aborted) {
@@ -234,8 +251,30 @@ export async function POST(request: Request) {
             continue;
           }
 
+          if (event.type === "status") {
+            processSteps = upsertProcessStep(processSteps, event.step);
+            if (
+              !enqueue(
+                controller,
+                encoder.encode(
+                  encodeStatusEvent(event.step.id, event.step.state, event.step.title, event.step.detail),
+                ),
+              )
+            ) {
+              await finishStopped();
+              return;
+            }
+            continue;
+          }
+
           if (event.type === "tool") {
-            if (!enqueue(controller, encoder.encode(encodeToolEvent(event.phase, event.name, event.detail)))) {
+            processSteps = upsertProcessStep(processSteps, stepFromTool(event));
+            if (
+              !enqueue(
+                controller,
+                encoder.encode(encodeToolEvent(event.id, event.phase, event.name, event.detail)),
+              )
+            ) {
               await finishStopped();
               return;
             }
@@ -281,12 +320,12 @@ export async function POST(request: Request) {
         }
 
         pushTrace(stopController.signal.aborted ? "生成已停止，已保存页面上看得到的回复" : "本轮完成", {
-          会话: config.fixedThreadId,
+          会话: threadId,
           增量段数: assistantParts.length,
           回复字数: Array.from(assistantParts.join("")).length,
         });
         if (!request.signal.aborted) {
-          enqueue(controller, encoder.encode(encodeDoneEvent(config.fixedThreadId)));
+          enqueue(controller, encoder.encode(encodeDoneEvent()));
         }
         closeQuietly(controller);
       } catch (error: unknown) {
@@ -302,7 +341,7 @@ export async function POST(request: Request) {
         const knowledgeError = findKnowledgeRetrievalError(error);
         const reason = knowledgeError ? knowledgeError.detail : errorText(error);
         logError("本轮失败", {
-          会话: config.fixedThreadId,
+          会话: threadId,
           阶段: phaseLabel(phase),
           增量段数: assistantParts.length,
           原因: reason,
@@ -311,7 +350,7 @@ export async function POST(request: Request) {
         enqueue(controller, encoder.encode(encodeErrorEvent(publicErrorMessage(phase, error))));
         closeQuietly(controller);
       } finally {
-        endActiveChatRun(stopThisRun);
+        endActiveChatRun(threadId, stopThisRun);
         request.signal.removeEventListener("abort", stopWhenRequestEnds);
       }
     },
@@ -320,7 +359,11 @@ export async function POST(request: Request) {
     },
   });
 
-  return new Response(stream, { headers: STREAM_RESPONSE_HEADERS });
+  const headers = new Headers(STREAM_RESPONSE_HEADERS);
+  if (visitor.setCookie) {
+    headers.append("Set-Cookie", visitor.setCookie);
+  }
+  return new Response(stream, { headers });
 }
 
 function phaseLabel(phase: "prepare" | "model" | "persist"): string {

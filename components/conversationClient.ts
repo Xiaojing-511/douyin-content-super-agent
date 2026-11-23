@@ -7,6 +7,7 @@
  * 这样已经展示的半截回复会入库，页面不会把看到的字清掉。
  * 停止请求没有对上当前这一轮时，才退回中止这次 fetch。
  * trace 事件只打到控制台，用来看检索和模型请求，不进入聊天记录。
+ * status 和 tool 交给页面，收成这一轮的过程条。
  */
 
 import { clientLogger } from "@/components/clientLogger";
@@ -18,6 +19,7 @@ import type {
   StreamDoneData,
   StreamErrorData,
   StreamFileData,
+  StreamStatusData,
   StreamToolData,
   StreamTraceData,
 } from "@/lib/conversation/types";
@@ -46,7 +48,6 @@ export async function loadConversationHistory(): Promise<ConversationHistory> {
   }
   const history = (await response.json()) as ConversationHistory;
   clientLogger.info("历史接口已返回", {
-    会话: history.threadId,
     条数: history.messages.length,
   });
   return history;
@@ -73,6 +74,7 @@ export async function requestStopGeneration(): Promise<boolean> {
 
 export interface StreamHandlers {
   onDelta: (deltaText: string) => void;
+  onStatus: (status: StreamStatusData) => void;
   onTool: (tool: StreamToolData) => void;
   onFile: (file: ExportLink) => void;
   onDone: (doneData: StreamDoneData) => void;
@@ -114,6 +116,9 @@ export async function streamReply(
       detail = "";
     }
     clientLogger.error("对话接口没有开始回复", { 状态码: response.status, 响应: detail });
+    if (response.status === 409) {
+      throw new ConversationRequestError(readErrorDetail(detail) ?? "上一轮还在生成");
+    }
     throw new ConversationRequestError("顾问服务没有开始回复。");
   }
 
@@ -172,6 +177,15 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function readErrorDetail(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    return typeof parsed.detail === "string" && parsed.detail.length > 0 ? parsed.detail : null;
+  } catch {
+    return null;
+  }
+}
+
 function dispatchServerEvent(eventName: string, data: unknown, handlers: StreamHandlers): void {
   if (eventName === "trace") {
     const traceData = data as StreamTraceData;
@@ -179,10 +193,28 @@ function dispatchServerEvent(eventName: string, data: unknown, handlers: StreamH
     clientLogger.info(step, traceData?.detail);
     return;
   }
+  if (eventName === "status") {
+    const statusData = data as StreamStatusData;
+    if (
+      typeof statusData?.id === "string" &&
+      typeof statusData.state === "string" &&
+      typeof statusData.title === "string"
+    ) {
+      handlers.onStatus({
+        id: statusData.id,
+        state: statusData.state,
+        title: statusData.title,
+        detail: typeof statusData.detail === "string" ? statusData.detail : "",
+      });
+    }
+    return;
+  }
   if (eventName === "tool") {
     const toolData = data as StreamToolData;
     if (typeof toolData?.phase === "string" && typeof toolData.name === "string") {
+      const id = typeof toolData.id === "string" && toolData.id.length > 0 ? toolData.id : toolData.name;
       handlers.onTool({
+        id,
         phase: toolData.phase,
         name: toolData.name,
         detail: typeof toolData.detail === "string" ? toolData.detail : "",
@@ -204,7 +236,7 @@ function dispatchServerEvent(eventName: string, data: unknown, handlers: StreamH
   }
   if (eventName === "done") {
     const doneData = data as StreamDoneData;
-    clientLogger.info("收到结束事件", { 会话: doneData.threadId });
+    clientLogger.info("收到结束事件");
     handlers.onDone(doneData);
     return;
   }
