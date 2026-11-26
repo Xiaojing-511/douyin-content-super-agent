@@ -101,8 +101,15 @@ export async function POST(request: Request) {
           预览: previewText(userText, 40),
           模型: config.llmModel || "未配置",
           允许联网: webSearch,
+          追踪: config.langsmithTracing ? config.langsmithProject || "未命名项目" : "关闭",
         },
-        { 会话: threadId, 内容: userText, 允许联网: webSearch },
+        {
+          会话: threadId,
+          内容: userText,
+          允许联网: webSearch,
+          追踪项目: config.langsmithProject,
+          追踪端点: config.langsmithEndpoint,
+        },
       );
 
       const persistVisibleTurn = (): Promise<PersistResult> => {

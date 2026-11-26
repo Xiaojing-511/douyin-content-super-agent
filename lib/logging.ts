@@ -83,6 +83,7 @@ export function redactSecrets(text: string): string {
   for (const secret of [
     config.llmApiKey,
     config.searchApiKey,
+    config.langsmithApiKey,
     (process.env.EMBEDDING_API_KEY ?? "").trim(),
     (process.env.RERANK_API_KEY ?? "").trim(),
   ]) {

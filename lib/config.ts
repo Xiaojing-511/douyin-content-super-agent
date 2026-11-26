@@ -4,6 +4,7 @@ import path from "node:path";
 
 /**
  * 这里读取会改变当前对话的值：数据库地址、日志级别、主模型，以及联网搜索和 PDF。
+ * LangSmith 的开关、密钥、项目和端点也在这里读取。真正发追踪的是 LangChain 客户端，它直接看这几个环境变量。
  * 小模型和外部 PDF 命令留在环境文件里，这里还不读取。
  * 嵌入模型和重排模型由 lib/knowledge/settings.ts 在灌库和检索时读取。
  * 重排三项都留空时，检索只按向量距离排序。
@@ -28,6 +29,10 @@ export const config = {
   exportRoot: path.join(process.cwd(), "data", "exports"),
   pdfFontPath: (process.env.PDF_FONT_PATH ?? "").trim(),
   pdfFontFamily: (process.env.PDF_FONT_FAMILY ?? "").trim(),
+  langsmithTracing: (process.env.LANGSMITH_TRACING ?? "").trim().toLowerCase() === "true",
+  langsmithApiKey: (process.env.LANGSMITH_API_KEY ?? "").trim(),
+  langsmithProject: (process.env.LANGSMITH_PROJECT ?? "").trim(),
+  langsmithEndpoint: (process.env.LANGSMITH_ENDPOINT ?? "").trim(),
 };
 
 export function missingModelSettingNames(): string[] {

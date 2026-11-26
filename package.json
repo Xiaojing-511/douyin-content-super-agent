@@ -14,6 +14,7 @@
     "@langchain/langgraph-checkpoint-postgres": "^1.1.4",
     "@langchain/openai": "^1.8.4",
     "drizzle-orm": "^0.45.4",
+    "langsmith": "^0.12.0",
     "next": "^16.4.6",
     "pdfkit": "^0.21.0",
     "pg": "^8.23.1",

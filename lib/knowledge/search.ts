@@ -1,13 +1,17 @@
 import "server-only";
 
+import type { RunnableConfig } from "@langchain/core/runnables";
+import { traceable } from "langsmith/traceable";
+
 import { getSqlClient } from "@/lib/db/client";
 import type { RetrievedChunk } from "@/lib/knowledge/context";
 import { embedTexts, redactSecret, toVectorLiteral } from "@/lib/knowledge/embed";
 import { KnowledgeRetrievalError } from "@/lib/knowledge/errors";
-import { rerankTexts } from "@/lib/knowledge/rerank";
+import { rerankTexts, type RerankHit } from "@/lib/knowledge/rerank";
 import { ensureKnowledgeSchema } from "@/lib/knowledge/schema";
-import { readEmbeddingSettings, readRerankSettings } from "@/lib/knowledge/settings";
+import { readEmbeddingSettings, readRerankSettings, type EmbeddingSettings, type RerankSettings } from "@/lib/knowledge/settings";
 import { embeddingInput, type KnowledgeSource } from "@/lib/knowledge/chunk-markdown";
+import { invokeTraced } from "@/lib/graph/tracing";
 import { logStep, previewText, type LogDetails } from "@/lib/logging";
 
 /**
@@ -15,6 +19,7 @@ import { logStep, previewText, type LogDetails } from "@/lib/logging";
  * 重排三项都配齐时，再把这 6 段交给 /rerank，按相关分留下 3 段放进提示。
  * 切分和嵌入在 npm run index-knowledge 里完成。知识库还是空的时候，不调用嵌入接口。
  * 嵌入、向量召回和重排都会打出中文步骤，并带上这一步的请求和片段原文。
+ * 追踪打开时，这三步再各记一条 LangSmith 子 run。向量和重排正文不上传，只上传维度、标题路径和分数。
  */
 
 export type KnowledgeTrace = (step: string, summary?: LogDetails, detail?: unknown) => void;
@@ -35,6 +40,7 @@ export async function searchKnowledge(
   query: string,
   signal?: AbortSignal,
   trace?: KnowledgeTrace,
+  runConfig?: RunnableConfig,
 ): Promise<RetrievedChunk[]> {
   const settings = readEmbeddingSettings();
   if (!settings || !query.trim()) {
@@ -73,10 +79,7 @@ export async function searchKnowledge(
       },
       { 接口: settings.baseUrl, 模型: settings.model, 输入: query },
     );
-    const [embedding] = await embedTexts([query], settings, signal);
-    if (!embedding) {
-      throw new Error("嵌入接口没有返回向量");
-    }
+    const embedding = await embedQuery(query, settings, signal, runConfig);
     emit(trace, "嵌入完成", { 模型: settings.model, 维度: embedding.length });
 
     step = "向量检索";
@@ -86,23 +89,12 @@ export async function searchKnowledge(
       去重后最多保留: RECALL_LIMIT,
     });
     const literal = toVectorLiteral(embedding);
-    const rows = await sql<ChunkRow[]>`
-      SELECT
-        doc_title,
-        doc_type,
-        heading_path,
-        content,
-        sources,
-        embedding <=> ${literal}::vector AS distance
-      FROM knowledge_chunks
-      ORDER BY embedding <=> ${literal}::vector
-      LIMIT ${RECALL_LIMIT * 2}
-    `;
-    const candidates = nearestDistinctHeadings(rows, RECALL_LIMIT);
+    const recalled = await recallChunks(sql, literal, runConfig);
+    const candidates = recalled.chunks;
     emit(
       trace,
       "向量召回完成",
-      { 原始行数: rows.length, 去重后条数: candidates.length },
+      { 原始行数: recalled.rowCount, 去重后条数: candidates.length },
       { 片段: candidates.map(describeChunk) },
     );
 
@@ -132,7 +124,7 @@ export async function searchKnowledge(
         文档: documents,
       },
     );
-    const ranked = await rerankTexts(query, documents, rerankSettings, RERANKED_PROMPT_LIMIT, signal);
+    const ranked = await rerankCandidates(query, documents, candidates, rerankSettings, signal, runConfig);
     const selected = ranked.map((hit) => {
       const chunk = candidates[hit.index];
       if (!chunk) {
@@ -150,6 +142,109 @@ export async function searchKnowledge(
     emit(trace, "知识库检索失败", { 停在: step }, { 停在: step, 原因: message });
     throw new KnowledgeRetrievalError(`${step}：${message}`);
   }
+}
+
+async function embedQuery(
+  query: string,
+  settings: EmbeddingSettings,
+  signal: AbortSignal | undefined,
+  runConfig: RunnableConfig | undefined,
+): Promise<number[]> {
+  const traced = traceable(
+    async (input: { query: string }) => {
+      const [vector] = await embedTexts([input.query], settings, signal);
+      if (!vector) {
+        throw new Error("嵌入接口没有返回向量");
+      }
+      return { dimensions: vector.length, vector };
+    },
+    {
+      name: "embed_query",
+      run_type: "embedding",
+      metadata: { model: settings.model },
+      processOutputs: (outputs) => ({ dimensions: outputs.dimensions }),
+    },
+  );
+  const embedded = await invokeTraced(runConfig, traced, { query });
+  return embedded.vector;
+}
+
+async function recallChunks(
+  sql: ReturnType<typeof getSqlClient>,
+  literal: string,
+  runConfig: RunnableConfig | undefined,
+): Promise<{ rowCount: number; chunks: RetrievedChunk[] }> {
+  const traced = traceable(
+    async (input: { limit: number }) => {
+      const rows = await sql<ChunkRow[]>`
+        SELECT
+          doc_title,
+          doc_type,
+          heading_path,
+          content,
+          sources,
+          embedding <=> ${literal}::vector AS distance
+        FROM knowledge_chunks
+        ORDER BY embedding <=> ${literal}::vector
+        LIMIT ${input.limit * 2}
+      `;
+      const chunks = nearestDistinctHeadings(rows, input.limit);
+      return {
+        rowCount: rows.length,
+        chunks,
+        hits: chunks.map((chunk) => ({
+          heading: chunk.headingPath,
+          distance: Number(chunk.distance.toFixed(4)),
+        })),
+      };
+    },
+    {
+      name: "vector_recall",
+      run_type: "retriever",
+      processInputs: (inputs) => ({ limit: inputs.limit }),
+      processOutputs: (outputs) => ({ rowCount: outputs.rowCount, hits: outputs.hits }),
+    },
+  );
+  const recalled = await invokeTraced(runConfig, traced, { limit: RECALL_LIMIT });
+  return { rowCount: recalled.rowCount, chunks: recalled.chunks };
+}
+
+async function rerankCandidates(
+  query: string,
+  documents: string[],
+  candidates: RetrievedChunk[],
+  settings: RerankSettings,
+  signal: AbortSignal | undefined,
+  runConfig: RunnableConfig | undefined,
+): Promise<RerankHit[]> {
+  const traced = traceable(
+    async (input: { query: string; headings: string[] }) => {
+      const hits = await rerankTexts(input.query, documents, settings, RERANKED_PROMPT_LIMIT, signal);
+      return {
+        hits,
+        scores: hits.map((hit) => ({
+          heading: candidates[hit.index]?.headingPath ?? "",
+          score: Number(hit.score.toFixed(4)),
+        })),
+      };
+    },
+    {
+      name: "rerank",
+      run_type: "retriever",
+      metadata: { model: settings.model, keep: RERANKED_PROMPT_LIMIT },
+      processInputs: (inputs) => ({
+        query: inputs.query,
+        headings: inputs.headings,
+        keep: RERANKED_PROMPT_LIMIT,
+      }),
+      processOutputs: (outputs) => ({ scores: outputs.scores }),
+    },
+  );
+  const ranked = await invokeTraced(runConfig, traced, {
+    query,
+    headings: candidates.map((chunk) => chunk.headingPath),
+  });
+  return ranked.hits;
 }
 
 function emit(trace: KnowledgeTrace | undefined, step: string, summary?: LogDetails, detail?: unknown): void {

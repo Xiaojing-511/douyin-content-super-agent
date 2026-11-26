@@ -38,6 +38,7 @@ import { logStep, previewText, type LogDetails } from "@/lib/logging";
  * 消息在图里追加，这样一轮里的工具结果还在。每一轮开始时先清空 checkpoint，再用消息表重建历史。
  * 工具消息不写入 conversation_messages。短步骤通过 status 和 tool 送到页面，结束时写入助手行的 process。
  * 下一轮提示只读 content。检索、模型请求和工具会打出中文日志，并把同一步发给浏览器控制台。
+ * LANGSMITH_TRACING=true 时，同一次图运行还会送到 LangSmith。页面协议不包含这次追踪。
  * 中止时路由会把已经推到页面上的半截回复写入消息表。一个字都还没推出去就中止的，消息表里没有这一轮。
  */
 
@@ -71,7 +72,12 @@ const globalForAdvisor = globalThis as unknown as {
 type StreamingChatModel = {
   stream: (
     messages: BaseMessage[],
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      callbacks?: LangGraphRunnableConfig["callbacks"];
+      tags?: LangGraphRunnableConfig["tags"];
+      metadata?: LangGraphRunnableConfig["metadata"];
+    },
   ) => Promise<AsyncIterable<AIMessageChunk>>;
 };
 
@@ -105,7 +111,7 @@ async function retrieveNode(
   );
   let knowledge: RetrievedChunk[];
   try {
-    knowledge = await searchKnowledge(query, runConfig.signal, report);
+    knowledge = await searchKnowledge(query, runConfig.signal, report, runConfig);
   } catch (error: unknown) {
     if (isAbortError(error)) {
       throw error;
@@ -172,7 +178,7 @@ async function advisorNode(
       消息: promptMessages.map(describeModelMessage),
     },
   );
-  const reply = await collectAssistantMessage(bound, promptMessages, runConfig.signal);
+  const reply = await collectAssistantMessage(bound, promptMessages, runConfig);
   const calls = reply.tool_calls ?? [];
   if (calls.length > 0) {
     const names = calls.map((call) => call.name).join("、");
@@ -272,7 +278,7 @@ async function forceReplyNode(
   );
   reportTrace(runConfig, "工具次数已用完，改为直接回答", { 已用工具轮次: state.toolRound });
   const promptMessages = [new SystemMessage(buildSystemPrompt(state)), ...state.messages, ...fillers];
-  const reply = await collectAssistantMessage(createChatModel(), promptMessages, runConfig.signal);
+  const reply = await collectAssistantMessage(createChatModel(), promptMessages, runConfig);
   if (!reply.text.trim()) {
     throw new Error("模型没有返回内容");
   }
@@ -354,6 +360,12 @@ export async function* iterAdvisorDeltas(input: {
       toolRound: 0,
     },
     {
+      runName: "顾问一轮",
+      tags: ["advisor"],
+      metadata: {
+        thread_id: input.threadId,
+        web_search: input.webSearch,
+      },
       configurable: { thread_id: input.threadId },
       streamMode: "custom",
       signal: input.signal,
@@ -389,9 +401,15 @@ function buildSystemPrompt(state: typeof AdvisorState.State): string {
 async function collectAssistantMessage(
   model: StreamingChatModel,
   messages: BaseMessage[],
-  signal: AbortSignal | undefined,
+  runConfig: LangGraphRunnableConfig,
 ): Promise<AIMessage> {
-  const stream = await model.stream(messages, { signal });
+  const signal = runConfig.signal;
+  const stream = await model.stream(messages, {
+    signal,
+    callbacks: runConfig.callbacks,
+    tags: runConfig.tags,
+    metadata: runConfig.metadata,
+  });
   let gathered: AIMessageChunk | undefined;
   for await (const chunk of stream) {
     if (signal?.aborted) {
